@@ -1,18 +1,29 @@
-# Command Code Usage for Omarchy agents panel
+# Command Code Usage for Omarchy
 
-Menampilkan usage `command-code` / `cmd` di panel `omarchy.agents`, meniru pola
+Shows `command-code` / `cmd` usage in the Omarchy agents panel, following the
+pattern of
 [`wellatleastitried/omarchy-copilot-panel-usage`](https://github.com/wellatleastitried/omarchy-copilot-panel-usage).
 
-## Cara kerja
+![Command Code tab in the Omarchy agents panel](./preview.png)
 
-* `bin/omarchy-agent-usage-commandcode` scan `~/.commandcode/projects/*/*.jsonl`
-  (skip `*.checkpoints.jsonl`, `*.prompts.jsonl`), hitung prompt/token per hari
-  dan per model, tulis ke `~/.local/state/omarchy/agents/usage/commandcode.json`.
-* `ui/main.qml` jalan tiap 5 menit + saat usage dir berubah, sama seperti plugin Copilot.
-* Panel `omarchy.agents` otomatis menampilkan tab baru begitu file JSON-nya ada —
-  tanpa edit `/usr/share/omarchy`.
+## How it works
 
-## Test manual
+- `bin/omarchy-agent-usage-commandcode` scans `~/.commandcode/projects/*/*.jsonl`
+  (skipping `*.checkpoints.jsonl` and `*.prompts.jsonl`), tallies prompts and
+  tokens per day and per model, and writes
+  `~/.local/state/omarchy/agents/usage/commandcode.json`.
+- `ui/main.qml` runs the collector every 5 minutes and whenever the usage
+  directory changes — same as the Copilot plugin.
+- The agents panel picks up the new tab automatically once the JSON record
+  exists. Nothing under `/usr/share/omarchy` is touched.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/jhonoryza/omarchy-commandcode-usage.git --enable
+```
+
+## Manual test
 
 ```bash
 ~/.config/omarchy/plugins/dell.commandcode-usage/bin/omarchy-agent-usage-commandcode | head -n 40
@@ -22,9 +33,16 @@ omarchy plugin validate ~/.config/omarchy/plugins/dell.commandcode-usage
 omarchy-shell shell rescanPlugins
 ```
 
-## Catatan
+## Notes
 
-* `command-code` tidak punya endpoint quota publik, jadi `limits: []` —
-  yang tampil: today, 7 hari terakhir, total per model.
-* Kalau mau icon sendiri, tambah `assets/commandcode.svg` (+ `commandcode-light.svg`
-  untuk light theme). Tanpa itu panel pakai glyph default.
+- Command Code exposes no public quota endpoint, so `limits` stays empty —
+  what you get is local stats: today, the last 7 days, and all-time totals
+  per model.
+- The panel resolves provider icons from the *agents* plugin's `assets/`
+  directory, so a custom `commandcode.svg` belongs there (see
+  [omarchy-agents-pin](https://github.com/jhonoryza/omarchy-agents-pin)),
+  not in this repo. Without one the panel falls back to its default glyph.
+
+## License
+
+MIT
