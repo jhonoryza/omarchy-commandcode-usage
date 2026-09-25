@@ -23,6 +23,12 @@ pattern of
 omarchy plugin add https://github.com/jhonoryza/omarchy-commandcode-usage.git --enable
 ```
 
+## Removal
+
+```bash
+omarchy plugin remove dell.commandcode-usage
+```
+
 ## Manual test
 
 ```bash
@@ -42,6 +48,13 @@ omarchy-shell shell rescanPlugins
   directory, so a custom `commandcode.svg` belongs there (see
   [omarchy-agents-pin](https://github.com/jhonoryza/omarchy-agents-pin)),
   not in this repo. Without one the panel falls back to its default glyph.
+
+## Dependencies
+
+- Python 3 (standard library only, no extra packages).
+- Command Code CLI sessions under `~/.commandcode/projects/` (respects
+  `COMMANDCODE_HOME` if set). Nothing is written outside
+  `~/.local/state/omarchy/agents/usage/`.
 
 ## License
 
