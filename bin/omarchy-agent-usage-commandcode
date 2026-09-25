@@ -1,0 +1,279 @@
+#!/usr/bin/python3
+# omarchy:summary=Print the Command Code usage record as JSON
+# omarchy:args=[--force] [--limits-only]
+# omarchy:hidden=true
+"""Collect Command Code usage into one display-ready JSON record.
+
+Reads durable JSONL transcripts from ~/.commandcode/projects/<slug>/<id>.jsonl
+(see https://commandcode.ai/docs/sessions). Every assistant message carries
+top-level `usage` (inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens/
+costUsd) and `model`. The agents panel only ever reads the JSON this prints;
+it never talks to these files directly.
+
+Sidecars (<id>.checkpoints.jsonl, <id>.prompts.jsonl, <id>.meta.json) are
+skipped — only the transcript itself is scanned.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+AGENT_ID = "commandcode"
+AGENT_NAME = "Command Code"
+AUTH_HELP = "Run `command-code login` to restore authentication."
+MAX_RECORD_BYTES = 1_000_000
+
+
+def expand_path(value: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def sessions_root() -> Path:
+    return expand_path(os.environ.get("COMMANDCODE_HOME") or "~/.commandcode") / "projects"
+
+
+def date_string(value: dt.date) -> str:
+    return value.strftime("%Y-%m-%d")
+
+
+def recent_date_strings() -> list[str]:
+    today = dt.datetime.now().date()
+    return [date_string(today - dt.timedelta(days=offset)) for offset in range(6, -1, -1)]
+
+
+def local_date_string() -> str:
+    return date_string(dt.datetime.now().date())
+
+
+def local_date_from_timestamp(value: Any) -> str:
+    if value is None:
+        return local_date_string()
+    if isinstance(value, (int, float)):
+        try:
+            seconds = float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+            return date_string(dt.datetime.fromtimestamp(seconds).date())
+        except Exception:
+            return local_date_string()
+    raw = str(value).strip()
+    if not raw:
+        return local_date_string()
+    try:
+        # Command Code writes ISO-8601, sometimes with millis + Z.
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return date_string(parsed.date())
+    except Exception:
+        return local_date_string()
+
+
+def number(value: Any) -> int:
+    try:
+        n = float(value or 0)
+        return round(n) if n == n else 0
+    except Exception:
+        return 0
+
+
+def empty_stats() -> dict[str, Any]:
+    return {
+        "todayPrompts": 0,
+        "todaySessions": 0,
+        "todayTotalTokens": 0,
+        "todayTokensByModel": {},
+        "recentDays": [{"date": d, "messageCount": 0} for d in recent_date_strings()],
+        "totalPrompts": 0,
+        "totalSessions": 0,
+        "activeDates": [],
+        "activeDays": 0,
+        "modelUsage": {},
+    }
+
+
+def empty_bucket() -> dict[str, int]:
+    return {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+    }
+
+
+def transcript_files(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for path in root.rglob("*.jsonl"):
+        name = path.name
+        if name.endswith(".checkpoints.jsonl") or name.endswith(".prompts.jsonl"):
+            continue
+        out.append(path)
+    return sorted(out)
+
+
+def scan_transcripts(root: Path) -> dict[str, Any]:
+    stats = empty_stats()
+    today = stats["recentDays"][-1]["date"]
+
+    seen: set[str] = set()
+    sessions_with_prompts: set[str] = set()
+    today_sessions: set[str] = set()
+    active_days: set[str] = set()
+    date_tokens: dict[str, int] = {}
+    today_tokens: dict[str, int] = {}
+    model_usage: dict[str, dict[str, int]] = {}
+    prompts = 0
+    today_prompt_count = 0
+    today_token_total = 0
+
+    for path in transcript_files(root):
+        session_key = str(path)
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"Ignoring unreadable Command Code transcript {path}: {exc}", file=sys.stderr)
+            continue
+        with handle:
+            for line_number, line in enumerate(handle, 1):
+                if '"usage"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+                role = message.get("role") or entry.get("role")
+                if role != "assistant":
+                    continue
+                usage = entry.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                input_tokens = number(usage.get("inputTokens"))
+                output_tokens = number(usage.get("outputTokens"))
+                cache_read = number(usage.get("cacheReadTokens"))
+                cache_write = number(usage.get("cacheWriteTokens"))
+                total = input_tokens + output_tokens + cache_read + cache_write
+                if total <= 0:
+                    continue
+                unique_key = f"{session_key}:{entry.get('id') or message.get('id') or line_number}"
+                if unique_key in seen:
+                    continue
+                seen.add(unique_key)
+
+                model = str(entry.get("model") or message.get("model") or "commandcode")
+                day = local_date_from_timestamp(entry.get("timestamp") or message.get("timestamp"))
+
+                prompts += 1
+                sessions_with_prompts.add(session_key)
+                active_days.add(day)
+                date_tokens[day] = date_tokens.get(day, 0) + total
+
+                bucket = model_usage.setdefault(model, empty_bucket())
+                bucket["inputTokens"] += input_tokens
+                bucket["outputTokens"] += output_tokens
+                bucket["cacheReadInputTokens"] += cache_read
+                bucket["cacheCreationInputTokens"] += cache_write
+
+                if day == today:
+                    today_prompt_count += 1
+                    today_sessions.add(session_key)
+                    today_token_total += total
+                    today_tokens[model] = today_tokens.get(model, 0) + total
+
+    stats["todayPrompts"] = today_prompt_count
+    stats["todaySessions"] = len(today_sessions)
+    stats["todayTotalTokens"] = today_token_total
+    stats["todayTokensByModel"] = today_tokens
+    stats["totalPrompts"] = prompts
+    stats["totalSessions"] = len(sessions_with_prompts)
+    stats["modelUsage"] = model_usage
+    stats["activeDates"] = sorted(active_days)
+    stats["activeDays"] = len(active_days)
+    for day_entry in stats["recentDays"]:
+        day_entry["messageCount"] = date_tokens.get(day_entry["date"], 0)
+    return stats
+
+
+def build_record(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "id": AGENT_ID,
+        "name": AGENT_NAME,
+        "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ready": number(stats.get("totalPrompts")) > 0,
+        "hasLocalStats": True,
+        "tierLabel": "",
+        "usageStatusText": "",
+        "authHelpText": AUTH_HELP,
+        # Command Code exposes no public quota endpoint; local stats only.
+        "limits": [],
+        **stats,
+    }
+
+
+def write_record(payload: str) -> None:
+    home = Path(os.environ.get("HOME") or "~").expanduser()
+    state_home = Path(os.environ.get("XDG_STATE_HOME") or (home / ".local" / "state"))
+    output_dir = state_home / "omarchy" / "agents" / "usage"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{AGENT_ID}.json"
+
+    if output_dir.is_symlink():
+        raise OSError(f"Output directory is a symlink: {output_dir}")
+    if output_file.exists() or output_file.is_symlink():
+        if output_file.is_symlink():
+            raise OSError(f"Output file is a symlink: {output_file}")
+        if not output_file.is_file():
+            raise OSError(f"Output file is not a regular file: {output_file}")
+
+    fd, temp_path = tempfile.mkstemp(dir=str(output_dir), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        shutil.move(temp_path, str(output_file))
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    # Accepted for agents-panel contract compatibility (cf. copilot collector):
+    # this scan is cheap and there is no limits endpoint, so every run is
+    # already both fresh and limits-only.
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--limits-only", action="store_true")
+    parser.add_argument("--write", action="store_true",
+                        help="Write to ~/.local/state/omarchy/agents/usage/commandcode.json instead of stdout")
+    args = parser.parse_args()
+
+    stats = scan_transcripts(sessions_root())
+    payload = json.dumps(build_record(stats), indent=2)
+    if len(payload.encode("utf-8")) > MAX_RECORD_BYTES:
+        payload = json.dumps(build_record(empty_stats()), indent=2)
+
+    if args.write:
+        try:
+            write_record(payload)
+        except (OSError, IOError) as exc:
+            print(f"commandcode-usage: write failed: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+    else:
+        print(payload)
+
+
+if __name__ == "__main__":
+    main()

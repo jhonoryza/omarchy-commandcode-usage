@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "dell.commandcode-usage",
+  "name": "Command Code Usage",
+  "version": "1.0.0",
+  "author": "dell",
+  "description": "Display Command Code usage in the Omarchy agents panel.",
+  "homepage": "",
+  "kinds": ["panel"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "ui/main.qml"
+  }
+}
